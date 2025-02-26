@@ -120,18 +120,18 @@ def update_slot():
 
 
 
-
 @app.route("/lock_check")
 def lock_check():
     """
-    Checks if current time >= (slot_end - 2 min).
-    If yes, locks all credentials that are locked=0 (but skip locked=2).
+    Called by Cron-Job.org every minute (or frequent interval).
+    If now >= slot_end - 2 min, lock all credentials that are locked=0.
+    Skips locked=2. Already locked=1 remains locked.
     """
     now = datetime.now()
-    # 1) Read slot_end from DB
-    resp = requests.get(DB_URL + "settings.json")
-    if resp.status_code == 200 and resp.json():
-        s_data = resp.json()
+    # 1) Read slot_end
+    settings_resp = requests.get(DB_URL + "settings.json")
+    if settings_resp.status_code == 200 and settings_resp.json():
+        s_data = settings_resp.json()
         slot_end_str = s_data.get("slot_end", "9999-12-31 09:00:00")
         try:
             slot_end_dt = datetime.strptime(slot_end_str, "%Y-%m-%d %H:%M:%S")
@@ -141,7 +141,7 @@ def lock_check():
         margin = timedelta(minutes=2)
         if now >= (slot_end_dt - margin):
             # 2) Lock all locked=0
-            lock_resp = requests.get(DB_URL + ".json")
+            lock_resp = requests.get(DB_URL + ".json")  # <--- EXACT URL: /.json
             if lock_resp.status_code == 200 and lock_resp.json():
                 all_data = lock_resp.json()
                 locked_count = 0
@@ -150,23 +150,22 @@ def lock_check():
                         continue
                     if isinstance(cred, dict):
                         locked_val = cred.get("locked", 0)
+                        # skip locked=2 or locked=1
                         if locked_val == 0:
-                            # lock it
+                            # set locked=1
                             update_credential_locked(key, 1)
                             locked_count += 1
                 return f"Locked {locked_count} creds.\n", 200
             else:
                 return "Failed to fetch credentials.\n", 200
         else:
-            # Not time to lock yet
             return "Not time to lock yet.\n", 200
     else:
         return "No settings or request error.\n", 200
 
-
 def update_credential_locked(credential_key, new_locked):
     """Utility to set locked field in DB for a single credential."""
-    url = DB_URL + f"/{credential_key}.json"
+    url = DB_URL + f"/{credential_key}.json"  # EXACT URL: /{cred_key}.json
     data = {"locked": new_locked}
     response = requests.patch(url, json=data)
     print(f"Locking {credential_key} -> locked={new_locked}, resp={response.text}")
