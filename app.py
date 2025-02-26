@@ -4,7 +4,7 @@ from flask import Flask
 
 app = Flask(__name__)
 
-DB_URL = "https://get-crunchy-credentials-default-rtdb.firebaseio.com"
+DB_URL = "https://get-crunchy-credentials-default-rtdb.firebaseio.com/"
 
 def update_slot_times_daily():
     # This code block is indented
