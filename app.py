@@ -7,41 +7,47 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# The environment variables on your hosting:
-REAL_DB_URL = os.getenv("REAL_DB_URL", "")  # e.g. "https://get-crunchy-credentials-default-rtdb.firebaseio.com/"
-PROXY_SECRET = os.getenv("PROXY_SECRET", "")  # e.g. "YOUR_SUPER_SECRET_TOKEN"
+REAL_DB_URL = os.getenv("REAL_DB_URL", "")
+PROXY_SECRET = os.getenv("PROXY_SECRET", "")
 
-# 1) Define the IST timezone
 ist = pytz.timezone("Asia/Kolkata")
 
-def parse_ist(dt_str: str) -> datetime:
+def parse_ist(dt_str: str):
     naive = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
     return ist.localize(naive)
 
 def format_ist(dt_aware: datetime) -> str:
     return dt_aware.strftime("%Y-%m-%d %H:%M:%S")
 
+# ---------------------------------
+# 1) New Helper: is_credential
+# ---------------------------------
+def is_credential(node):
+    """
+    Return True if 'node' is a dict with these required fields:
+      email, password, expiry_date, locked, usage_count, max_usage
+    """
+    if not isinstance(node, dict):
+        return False
+    required_fields = ["email", "password", "expiry_date", "locked", "usage_count", "max_usage"]
+    return all(field in node for field in required_fields)
+
 def lock_all_except_2():
-    """
-    Lock all credentials that have locked=0 (skip locked=1 or locked=2).
-    Called right after we do the daily slot shift.
-    """
     resp = requests.get(REAL_DB_URL + ".json")
     if resp.status_code == 200 and resp.json():
         all_data = resp.json()
         locked_count = 0
 
         for key, node in all_data.items():
-            # 1) If it's not shaped like a credential, skip
+            # only lock if it's a real credential
             if not is_credential(node):
                 continue
 
             locked_val = int(node["locked"])
 
-            # locked=2 => skip entirely (never auto-lock)
+            # locked=2 => skip
             # locked=1 => already locked
             if locked_val == 0:
-                # auto-lock it => set locked=1
                 patch_url = REAL_DB_URL + f"/{key}.json"
                 patch_data = {"locked": 1}
                 patch_resp = requests.patch(patch_url, json=patch_data)
@@ -53,9 +59,6 @@ def lock_all_except_2():
         print("Failed to fetch credentials for locking.")
 
 def update_slot_times_daily():
-    """
-    Runs the daily slot logic.
-    """
     now = datetime.now(ist)
     
     settings_resp = requests.get(REAL_DB_URL + "settings.json")
@@ -75,7 +78,7 @@ def update_slot_times_daily():
         delta = now - last_update_dt
         if delta < timedelta(hours=24):
             print(f"Only {delta} since last update; not 24h yet. Skipping shift.")
-            return  
+            return
 
         print(f"24h+ since last update. Proceeding with slot shift. override={override}")
 
@@ -115,10 +118,6 @@ def update_slot():
 
 @app.route("/lock_check")
 def lock_check():
-    """
-    Called by Cron-Job.org every minute.
-    If now >= slot_end - 2 min, lock all credentials that are locked=0.
-    """
     now = datetime.now()
     settings_resp = requests.get(REAL_DB_URL + "settings.json")
     if settings_resp.status_code == 200 and settings_resp.json():
@@ -135,14 +134,16 @@ def lock_check():
             if lock_resp.status_code == 200 and lock_resp.json():
                 all_data = lock_resp.json()
                 locked_count = 0
-                for key, cred in all_data.items():
-                    if key == "settings":
+                for key, node in all_data.items():
+                    # skip if not a credential
+                    if not is_credential(node):
                         continue
-                    if isinstance(cred, dict):
-                        locked_val = cred.get("locked", 0)
-                        if locked_val == 0:
-                            update_credential_locked(key, 1)
-                            locked_count += 1
+
+                    locked_val = int(node["locked"])
+                    # if locked=0 => lock it
+                    if locked_val == 0:
+                        update_credential_locked(key, 1)
+                        locked_count += 1
                 return f"Locked {locked_count} creds.\n", 200
             else:
                 return "Failed to fetch credentials.\n", 200
@@ -157,19 +158,14 @@ def update_credential_locked(credential_key, new_locked):
     response = requests.patch(url, json=data)
     print(f"Locking {credential_key} -> locked={new_locked}, resp={response.text}")
 
-# ---------------- NEW PROXY ROUTES to hide DB URL ----------------
-
+# NEW PROXY ROUTES
 @app.route("/getData", methods=["GET"])
 def get_data():
-    """
-    Return the entire root of the DB (REAL_DB_URL + ".json").
-    We'll check the secret token first.
-    """
     token = request.headers.get("X-Secret")
     if token != PROXY_SECRET:
         return jsonify({"error": "Unauthorized"}), 403
 
-    url = REAL_DB_URL + ".json"  # entire DB root
+    url = REAL_DB_URL + ".json"
     resp = requests.get(url)
     if resp.status_code != 200:
         return jsonify({"error": "Failed to read DB"}), 500
@@ -178,10 +174,6 @@ def get_data():
 
 @app.route("/setData", methods=["POST"])
 def set_data():
-    """
-    Overwrite the entire root DB with posted JSON.
-    Check secret token first.
-    """
     token = request.headers.get("X-Secret")
     if token != PROXY_SECRET:
         return jsonify({"error": "Unauthorized"}), 403
@@ -195,5 +187,4 @@ def set_data():
     return jsonify({"status": "ok", "resp": resp.text})
 
 if __name__ == "__main__":
-    # For local debugging. On Render, they'll auto-run with gunicorn or similar.
     app.run(host="0.0.0.0", port=5000)
