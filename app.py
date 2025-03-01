@@ -22,25 +22,23 @@ def format_ist(dt_aware: datetime) -> str:
     return dt_aware.strftime("%Y-%m-%d %H:%M:%S")
 
 def lock_all_except_2():
-    """
-    Lock all credentials that have locked=0 (skip locked=2).
-    Called right after we do the daily slot shift.
-    """
     resp = requests.get(REAL_DB_URL + ".json")
     if resp.status_code == 200 and resp.json():
         all_data = resp.json()
         locked_count = 0
-        for key, cred in all_data.items():
-            if key == "settings":
+        for key, node in all_data.items():
+            # Instead of skipping "settings", etc. by name,
+            # skip if not is_credential(node).
+            if not is_credential(node):
                 continue
-            if isinstance(cred, dict):
-                locked_val = cred.get("locked", 0)
-                if locked_val == 0:  # Only lock if currently unlocked
-                    patch_url = REAL_DB_URL + f"/{key}.json"
-                    patch_data = {"locked": 1}
-                    patch_resp = requests.patch(patch_url, json=patch_data)
-                    if patch_resp.status_code == 200:
-                        locked_count += 1
+
+            locked_val = node.get("locked", 0)
+            if locked_val == 0:
+                patch_url = REAL_DB_URL + f"/{key}.json"
+                patch_data = {"locked": 1}
+                patch_resp = requests.patch(patch_url, json=patch_data)
+                if patch_resp.status_code == 200:
+                    locked_count += 1
         print(f"Locked {locked_count} credentials.")
     else:
         print("Failed to fetch credentials for locking.")
