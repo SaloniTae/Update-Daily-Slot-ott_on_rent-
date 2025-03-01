@@ -86,7 +86,6 @@ def update_slot_times_daily():
         if not slot_info.get("enabled", False):
             continue
 
-        # if you also want to handle 'override' or skip logic, do it here
         override = slot_info.get("override", False)
 
         last_update_str = slot_info.get("last_update", "")
@@ -123,18 +122,15 @@ def update_slot_times_daily():
         else:
             slot_end_dt = slot_start_dt + timedelta(days=1)
 
-        # frequency => daily or weekly
-        freq = slot_info.get("frequency","daily")
-        if freq.lower() == "weekly":
+        freq = slot_info.get("frequency","daily").lower()
+        if freq == "weekly":
             shift_delta = timedelta(days=7)
         else:
             shift_delta = timedelta(days=1)
 
-        # SHIFT by shift_delta
         next_slot_start = slot_start_dt + shift_delta
         next_slot_end   = slot_end_dt   + shift_delta
 
-        # Update the slot in memory
         slot_info["slot_start"]  = format_ist(next_slot_start)
         slot_info["slot_end"]    = format_ist(next_slot_end)
         slot_info["last_update"] = format_ist(now_ist)
@@ -143,7 +139,7 @@ def update_slot_times_daily():
         any_slot_shifted = True
         print(f"Slot {slot_id} SHIFTED -> start={slot_info['slot_start']} end={slot_info['slot_end']} freq={freq}")
 
-    # 3) If we updated any slot, patch them back to DB & lock credentials
+    # 3) If we updated any slot, patch them back & lock credentials
     if any_slot_shifted:
         patch_resp = requests.patch(REAL_DB_URL + "settings.json", json={"slots": all_slots})
         if patch_resp.status_code == 200:
@@ -188,12 +184,9 @@ def lock_check():
         try:
             slot_end_dt = parse_ist(slot_end_str)
         except ValueError:
-            # skip invalid
             continue
 
-        # if now >= slot_end_dt - margin => lock
         if now_ist >= (slot_end_dt - margin):
-            # Lock all credentials with locked=0
             lock_resp = requests.get(REAL_DB_URL + ".json")
             if lock_resp.status_code == 200 and lock_resp.json():
                 all_data = lock_resp.json()
@@ -207,10 +200,8 @@ def lock_check():
                         p = requests.patch(patch_url, json=patch_data)
                         if p.status_code == 200:
                             locked_count_total += 1
-            # else skip
     return f"Locked {locked_count_total} creds.\n", 200
 
-# If you still want a function to do single credential locked=1:
 def update_credential_locked(credential_key, new_locked):
     url = REAL_DB_URL + f"/{credential_key}.json"
     data = {"locked": new_locked}
