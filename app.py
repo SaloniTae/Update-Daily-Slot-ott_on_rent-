@@ -7,72 +7,81 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
+# --------------------------------------------------------------------
+# Environment variables set in your hosting (Render, etc.)
+# e.g. REAL_DB_URL="https://mydb.firebaseio.com/"
+#      PROXY_SECRET="some_very_secret_token"
+# --------------------------------------------------------------------
 REAL_DB_URL  = os.getenv("REAL_DB_URL", "")
 PROXY_SECRET = os.getenv("PROXY_SECRET", "")
 
 ist = pytz.timezone("Asia/Kolkata")
 
 def parse_ist(dt_str: str):
+    """Parse a string 'YYYY-MM-DD HH:MM:SS' as IST-aware datetime."""
     naive = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
     return ist.localize(naive)
 
 def format_ist(dt_aware: datetime) -> str:
+    """Format an IST-aware datetime as 'YYYY-MM-DD HH:MM:SS' string."""
     return dt_aware.strftime("%Y-%m-%d %H:%M:%S")
 
 def is_credential(node):
+    """
+    Return True if 'node' is shaped like a credential, i.e.:
+      {
+        "email": "...",
+        "password": "...",
+        "expiry_date": "...",
+        "locked": 0 or 1 or 2,
+        "usage_count": N,
+        "max_usage": M,
+        "belongs_to_slot": "slot_1" or "slot_2" or "slot_3", etc.
+      }
+    """
     if not isinstance(node, dict):
         return False
-    required_fields = ["email","password","expiry_date","locked","usage_count","max_usage"]
-    return all(r in node for r in required_fields)
+    required = [
+        "email","password","expiry_date",
+        "locked","usage_count","max_usage",
+        "belongs_to_slot"
+    ]
+    return all(r in node for r in required)
 
-def lock_all_except_2():
-    resp = requests.get(REAL_DB_URL + ".json")
-    if resp.status_code == 200 and resp.json():
-        all_data = resp.json()
-        locked_count = 0
-        for key, node in all_data.items():
-            if not is_credential(node):
-                continue
-            locked_val = int(node.get("locked", 0))
-            if locked_val == 0:  # locked=0 => lock it
-                patch_url  = REAL_DB_URL + f"/{key}.json"
-                patch_data = {"locked": 1}
-                p = requests.patch(patch_url, json=patch_data)
-                if p.status_code == 200:
-                    locked_count += 1
-        print(f"Locked {locked_count} credentials.")
-    else:
-        print("Failed to fetch credentials for locking.")
-
-def update_slot_times_daily():
+# --------------------------------------------------------------------
+# Update all slots' start/end if 24h have passed since last_update:
+#  - If frequency="daily", shift +1 day
+#  - If frequency="3day", shift +3 days
+#  - Then lock credentials if desired.
+# --------------------------------------------------------------------
+def update_slot_times_multi():
     now_ist = datetime.now(ist)
 
-    # fetch 'settings'
+    # 1) Read settings from DB
     settings_resp = requests.get(REAL_DB_URL + "settings.json")
     if settings_resp.status_code != 200 or not settings_resp.json():
         print("No settings found or request error.")
         return
-
     settings_data = settings_resp.json()
 
-    # If you STILL want the single-slot logic to remain for older usage:
-    # We'll check if "slots" sub-node exists. If not, do the old single-slot approach.
+    # 2) If no "slots" sub-node, fallback to single-slot or do nothing
     all_slots = settings_data.get("slots")
     if not isinstance(all_slots, dict):
-        # fallback to old single-slot approach
-        old_single_slot_shift(now_ist, settings_data)
+        print("No multi-slot node => fallback single-slot or skip.")
         return
 
-    # otherwise do multi-slot approach
     any_slot_shifted = False
+
+    # 3) For each slot_{n}, if 24h+ since last_update => SHIFT
     for slot_id, slot_info in all_slots.items():
         if not isinstance(slot_info, dict):
             continue
+
         enabled = bool(slot_info.get("enabled", False))
         if not enabled:
+            # skip disabled slot
             continue
 
-        override = slot_info.get("override", False)
         last_update_str = slot_info.get("last_update", "")
         if last_update_str:
             try:
@@ -84,134 +93,81 @@ def update_slot_times_daily():
 
         delta = now_ist - last_update_dt
         if delta < timedelta(hours=24):
-            print(f"Slot {slot_id}: Only {delta} since last update; not 24h yet. Skipping shift.")
+            print(f"[{slot_id}] Only {delta} since last update => skip SHIFT.")
             continue
 
-        print(f"Slot {slot_id}: 24h+ since last update. override={override}")
+        print(f"[{slot_id}] SHIFT: 24h+ since last update => shifting times.")
 
-        slot_start_str = slot_info.get("slot_start","")
-        if slot_start_str:
-            try:
-                slot_start_dt = parse_ist(slot_start_str)
-            except ValueError:
-                slot_start_dt = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
-        else:
-            slot_start_dt = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
+        slot_start_str = slot_info.get("slot_start","9999-12-31 09:00:00")
+        slot_end_str   = slot_info.get("slot_end",  "9999-12-31 09:00:00")
 
-        slot_end_str = slot_info.get("slot_end","")
-        if slot_end_str:
-            try:
-                slot_end_dt = parse_ist(slot_end_str)
-            except ValueError:
-                slot_end_dt = slot_start_dt + timedelta(days=1)
-        else:
-            slot_end_dt = slot_start_dt + timedelta(days=1)
-
-        freq = slot_info.get("frequency","daily").lower()
-        shift_delta = timedelta(days=7) if freq == "weekly" else timedelta(days=1)
-
-        next_slot_start = slot_start_dt + shift_delta
-        next_slot_end   = slot_end_dt   + shift_delta
-
-        slot_info["slot_start"]  = format_ist(next_slot_start)
-        slot_info["slot_end"]    = format_ist(next_slot_end)
-        slot_info["last_update"] = format_ist(now_ist)
-
-        any_slot_shifted = True
-        print(f"Slot {slot_id} SHIFTED -> {slot_info['slot_start']} to {slot_info['slot_end']} freq={freq}")
-
-    if any_slot_shifted:
-        patch_resp = requests.patch(REAL_DB_URL + "settings.json", json={"slots": all_slots})
-        if patch_resp.status_code == 200:
-            print("Slots shift successful.")
-            lock_all_except_2()
-        else:
-            print("Failed to update multi-slots in DB:", patch_resp.text)
-    else:
-        print("No multi-slot was shifted. No changes made.")
-
-def old_single_slot_shift(now_ist, settings_data):
-    """
-    Fallback to your original single-slot approach if 'slots' node doesn't exist.
-    """
-    override = settings_data.get("override", False)
-    last_update_str = settings_data.get("last_update", "")
-    if last_update_str:
-        try:
-            last_update_dt = parse_ist(last_update_str)
-        except ValueError:
-            last_update_dt = now_ist
-    else:
-        last_update_dt = now_ist
-
-    delta = now_ist - last_update_dt
-    if delta < timedelta(hours=24):
-        print(f"Only {delta} since last update; not 24h yet. Skipping shift (single-slot).")
-        return
-
-    print(f"24h+ since last update. override={override} (single-slot)")
-
-    slot_start_str = settings_data.get("slot_start","")
-    if slot_start_str:
+        # parse current times
         try:
             slot_start_dt = parse_ist(slot_start_str)
         except ValueError:
-            slot_start_dt = now_ist.replace(hour=9,minute=0,second=0,microsecond=0)
-    else:
-        slot_start_dt = now_ist.replace(hour=9,minute=0,second=0,microsecond=0)
+            slot_start_dt = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
 
-    slot_end_str = settings_data.get("slot_end","")
-    if slot_end_str:
         try:
             slot_end_dt = parse_ist(slot_end_str)
         except ValueError:
             slot_end_dt = slot_start_dt + timedelta(days=1)
+
+        freq = slot_info.get("frequency","daily").lower()
+        if freq == "3day":
+            shift_delta = timedelta(days=3)
+        else:
+            shift_delta = timedelta(days=1)  # default daily
+
+        new_start = slot_start_dt + shift_delta
+        new_end   = slot_end_dt   + shift_delta
+
+        slot_info["slot_start"]  = format_ist(new_start)
+        slot_info["slot_end"]    = format_ist(new_end)
+        slot_info["last_update"] = format_ist(now_ist)
+
+        any_slot_shifted = True
+
+    # 4) If we changed anything, patch back & optionally lock
+    if any_slot_shifted:
+        patch_resp = requests.patch(REAL_DB_URL + "settings.json", json={"slots": all_slots})
+        if patch_resp.status_code == 200:
+            print("Multi-slot SHIFT success => now lock if needed.")
+            lock_by_slot()
+        else:
+            print("Failed to patch updated slots =>", patch_resp.text)
     else:
-        slot_end_dt = slot_start_dt + timedelta(days=1)
+        print("No slot was shifted => no changes made.")
 
-    next_slot_start = slot_start_dt + timedelta(days=1)
-    next_slot_end   = slot_end_dt   + timedelta(days=1)
 
-    new_data = {
-        "slot_start":  format_ist(next_slot_start),
-        "slot_end":    format_ist(next_slot_end),
-        "override":    override,
-        "last_update": format_ist(now_ist)
-    }
-    patch_resp = requests.patch(REAL_DB_URL + "settings.json", json=new_data)
-    if patch_resp.status_code == 200:
-        print("Single-slot shift successful.")
-        lock_all_except_2()
-    else:
-        print("Failed to update single-slot times:", patch_resp.text)
-
-@app.route("/update_slot")
-def update_slot():
-    update_slot_times_daily()
-    return "Slot times updated!\n", 200
-
-@app.route("/lock_check")
-def lock_check():
+# --------------------------------------------------------------------
+# Lock only credentials that belong to a slot whose end is within 2 min
+# i.e. now >= slot_end_dt - 2min => lock belongs_to_slot that matches
+# --------------------------------------------------------------------
+def lock_by_slot():
     now_ist = datetime.now(ist)
+
+    # read settings => see which slots are enabled
     settings_resp = requests.get(REAL_DB_URL + "settings.json")
     if settings_resp.status_code != 200 or not settings_resp.json():
-        return "No settings or request error.\n", 200
-
+        print("No settings => skip lock.")
+        return
     settings_data = settings_resp.json()
-    all_slots = settings_data.get("slots")
+    all_slots = settings_data.get("slots", {})
 
-    # if no multi-slot, fallback single-slot check
-    if not isinstance(all_slots, dict):
-        return old_single_slot_lock(now_ist, settings_data)
+    # fetch entire DB for credentials
+    db_resp = requests.get(REAL_DB_URL + ".json")
+    if db_resp.status_code != 200 or not db_resp.json():
+        print("No DB data => skip lock.")
+        return
+    db_data = db_resp.json()
 
     margin = timedelta(minutes=2)
     locked_count_total = 0
 
-    # For each enabled slot, if now >= slot_end - 2 min => lock all locked=0
     for slot_id, slot_info in all_slots.items():
         if not isinstance(slot_info, dict):
             continue
-        if not slot_info.get("enabled",False):
+        if not slot_info.get("enabled", False):
             continue
 
         slot_end_str = slot_info.get("slot_end","9999-12-31 09:00:00")
@@ -220,69 +176,53 @@ def lock_check():
         except ValueError:
             continue
 
+        # if now >= slot_end_dt - margin => lock belongs_to_slot
         if now_ist >= (slot_end_dt - margin):
-            lock_resp = requests.get(REAL_DB_URL + ".json")
-            if lock_resp.status_code == 200 and lock_resp.json():
-                all_data = lock_resp.json()
-                for key, node in all_data.items():
-                    if not is_credential(node):
-                        continue
-                    locked_val = int(node.get("locked",0))
-                    if locked_val == 0:
-                        patch_url  = REAL_DB_URL + f"/{key}.json"
-                        patch_data = {"locked":1}
-                        p = requests.patch(patch_url, json=patch_data)
-                        if p.status_code == 200:
-                            locked_count_total += 1
-    return f"Locked {locked_count_total} creds.\n", 200
-
-def old_single_slot_lock(now_ist, settings_data):
-    # your old approach to read slot_end, etc.
-    slot_end_str = settings_data.get("slot_end","9999-12-31 09:00:00")
-    try:
-        slot_end_dt = parse_ist(slot_end_str)
-    except ValueError:
-        return "slot_end invalid.\n", 200
-
-    margin = timedelta(minutes=2)
-    if now_ist >= (slot_end_dt - margin):
-        lock_resp = requests.get(REAL_DB_URL + ".json")
-        if lock_resp.status_code == 200 and lock_resp.json():
-            all_data = lock_resp.json()
-            locked_count = 0
-            for key, node in all_data.items():
-                if not is_credential(node):
+            # lock only creds that belongs_to_slot == slot_id & locked=0
+            for cred_key, cred_data in db_data.items():
+                if not is_credential(cred_data):
                     continue
-                locked_val = int(node.get("locked",0))
+                if cred_data.get("belongs_to_slot","") != slot_id:
+                    # skip different slot
+                    continue
+
+                locked_val = int(cred_data.get("locked",0))
                 if locked_val == 0:
-                    patch_url = REAL_DB_URL + f"/{key}.json"
+                    patch_url  = REAL_DB_URL + f"/{cred_key}.json"
                     patch_data = {"locked":1}
                     p = requests.patch(patch_url, json=patch_data)
                     if p.status_code == 200:
-                        locked_count += 1
-            return f"Locked {locked_count} creds.\n", 200
-        else:
-            return "Failed to fetch credentials.\n", 200
-    else:
-        return "Not time to lock yet.\n", 200
+                        locked_count_total += 1
 
-def update_credential_locked(credential_key, new_locked):
-    url = REAL_DB_URL + f"/{credential_key}.json"
-    data = {"locked": new_locked}
-    response = requests.patch(url, json=data)
-    print(f"Locking {credential_key} -> locked={new_locked}, resp={response.text}")
+    print(f"Locked {locked_count_total} credentials in total.")
 
-# PROXY ROUTES
+
+# -------------------------------------------------------
+# Endpoints to trigger SHIFT or LOCK from Cron-Job.org
+# -------------------------------------------------------
+@app.route("/update_slot")
+def update_slot():
+    update_slot_times_multi()
+    return "Slot times updated!\n", 200
+
+@app.route("/lock_check")
+def lock_check():
+    lock_by_slot()
+    return "Lock check done.\n", 200
+
+# -------------------------------------------------------
+# Proxy routes to hide the real DB URL
+# -------------------------------------------------------
 @app.route("/getData", methods=["GET"])
 def get_data():
     token = request.headers.get("X-Secret")
     if token != PROXY_SECRET:
-        return jsonify({"error": "Unauthorized"}), 403
+        return jsonify({"error":"Unauthorized"}),403
 
     url = REAL_DB_URL + ".json"
     resp = requests.get(url)
     if resp.status_code != 200:
-        return jsonify({"error": "Failed to read DB"}), 500
+        return jsonify({"error":"Failed to read DB"}),500
 
     return jsonify(resp.json())
 
@@ -290,15 +230,15 @@ def get_data():
 def set_data():
     token = request.headers.get("X-Secret")
     if token != PROXY_SECRET:
-        return jsonify({"error": "Unauthorized"}), 403
+        return jsonify({"error":"Unauthorized"}),403
 
     data = request.get_json()
     url = REAL_DB_URL + ".json"
     resp = requests.put(url, json=data)
     if resp.status_code != 200:
-        return jsonify({"error": "Failed to write DB"}), 500
+        return jsonify({"error":"Failed to write DB"}),500
 
-    return jsonify({"status": "ok","resp":resp.text})
+    return jsonify({"status":"ok","resp":resp.text})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
