@@ -133,6 +133,14 @@ def update_slot_times_multi():
         if patch_resp.status_code == 200:
             print("Multi-slot SHIFT success => now lock if needed.")
             lock_by_slot()
+
+          
+            # *** NEW: Reset Account Claims After Update ***
+            print("Calling reset_account_claims() after slot update.")
+            reset_account_claims()
+
+
+        
         else:
             print("Failed to patch updated slots =>", patch_resp.text)
     else:
@@ -235,7 +243,7 @@ def read_data_via_proxy():
         if resp.status_code == 200:
             data = resp.json() or {}
             print("Successfully connected to DB via proxy.")
-            print(f"DB data: {data}")
+            
             return data
         else:
             print(f"Proxy read error: {resp.text}")
@@ -244,23 +252,24 @@ def read_data_via_proxy():
         print(f"read_data_via_proxy exception: {e}")
         return {}
 
-@app.route("/reset_account_claims", methods=["GET", "POST"])
 def reset_account_claims():
     # Read the full DB data via proxy.
     db_data = read_data_via_proxy()
     if not db_data:
-        return jsonify({"status": "No DB data available"}), 200
+        print("No DB data available for reset.")
+        return
 
     # Get slot settings.
     slots = db_data.get("settings", {}).get("slots", {})
     if not slots:
-        return jsonify({"status": "No slot settings found"}), 200
+        print("No slot settings found.")
+        return
 
     current_time = datetime.now()
     account_claims = db_data.get("account_claims", {})
     claims_updated = False
 
-    # For each slot in settings, if current time is past slot_end, remove claim entries for that slot.
+    # For each slot in settings, check and clear claims if needed.
     for slot_id, slot_info in slots.items():
         slot_end_str = slot_info.get("slot_end", "")
         if not slot_end_str:
@@ -272,7 +281,6 @@ def reset_account_claims():
             continue
 
         if current_time > slot_end:
-            # For each user in account_claims, remove this slot if claimed.
             for user_id, claims in account_claims.items():
                 if slot_id in claims:
                     print(f"Clearing account claim for user {user_id} in slot {slot_id}.")
@@ -283,10 +291,8 @@ def reset_account_claims():
         db_data["account_claims"] = account_claims
         result = write_data_via_proxy(db_data)
         print("Account claims reset updated in DB.")
-        return jsonify({"status": "Account claims reset", "result": result}), 200
     else:
         print("No account claims needed resetting.")
-        return jsonify({"status": "No claims needed resetting"}), 200
 
 
 # -------------------------------------------------------
