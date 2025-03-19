@@ -71,6 +71,11 @@ def update_slot_times_multi():
         return
 
     any_slot_shifted = False
+    
+    # *** NEW: Reset Account Claims After Update ***
+    print("Calling reset_account_claims() after slot update.")
+    reset_account_claims()
+
 
     # 3) For each slot_{n}, if 24h+ since last_update => SHIFT
     for slot_id, slot_info in all_slots.items():
@@ -135,9 +140,7 @@ def update_slot_times_multi():
             lock_by_slot()
 
           
-            # *** NEW: Reset Account Claims After Update ***
-            print("Calling reset_account_claims() after slot update.")
-            reset_account_claims()
+
 
 
         
@@ -265,7 +268,8 @@ def reset_account_claims():
         print("No slot settings found.")
         return
 
-    current_time = datetime.now()
+    now_ist = datetime.now(ist)
+
     account_claims = db_data.get("account_claims", {})
     claims_updated = False
 
@@ -275,12 +279,12 @@ def reset_account_claims():
         if not slot_end_str:
             continue
         try:
-            slot_end = datetime.strptime(slot_end_str, "%Y-%m-%d %H:%M:%S")
+            slot_end = parse_ist(slot_end_str)  # Use parse_ist for IST timezone parsing
         except Exception as e:
             print(f"Error parsing slot_end for {slot_id}: {e}")
             continue
 
-        if current_time > slot_end:
+        if now_ist > slot_end:
             for user_id, claims in account_claims.items():
                 if slot_id in claims:
                     print(f"Clearing account claim for user {user_id} in slot {slot_id}.")
