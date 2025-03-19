@@ -240,5 +240,43 @@ def set_data():
 
     return jsonify({"status":"ok","resp":resp.text})
 
+
+
+@app.route("/reset_account_claims", methods=["POST"])
+def reset_account_claims():
+    # Read the current DB data via your proxy function
+    db_data = read_data_via_proxy()
+    if not db_data:
+        return jsonify({"error": "Failed to read DB data"}), 500
+
+    # Get slot settings
+    slots = db_data.get("settings", {}).get("slots", {})
+    if not slots:
+        return jsonify({"error": "No slot settings found"}), 400
+
+    current_time = datetime.now()
+    account_claims = db_data.get("account_claims", {})
+    claims_updated = False
+
+    # For each slot, if current time is past slot_end, remove claim entries for that slot
+    for slot_id, slot_info in slots.items():
+        slot_end_str = slot_info.get("slot_end", "")
+        slot_end = parse_datetime(slot_end_str)
+        if slot_end is None:
+            continue
+        if current_time > slot_end:
+            for user_id, claims in account_claims.items():
+                if slot_id in claims:
+                    del claims[slot_id]
+                    claims_updated = True
+
+    if claims_updated:
+        db_data["account_claims"] = account_claims
+        result = write_data_via_proxy(db_data)
+        return jsonify({"status": "Account claims reset", "result": result}), 200
+    else:
+        return jsonify({"status": "No claims needed resetting"}), 200
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
