@@ -214,17 +214,53 @@ def lock_check():
 # -------------------------------------------------------
 # Endpoint to reset account claims (for new slot windows)
 # -------------------------------------------------------
+def write_data_via_proxy(data):
+    headers = {"X-Secret": PROXY_SECRET}
+    try:
+        resp = requests.put(f"{REAL_DB_URL}.json", json=data, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            print(f"Proxy write error: {resp.text}")
+            return {}
+    except Exception as e:
+        print(f"write_data_via_proxy exception: {e}")
+        return {}
+
+def read_data_via_proxy():
+    headers = {"X-Secret": PROXY_SECRET}
+    try:
+        print(f"Connecting to DB proxy at: {REAL_DB_URL}.json")
+        resp = requests.get(f"{REAL_DB_URL}.json", headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            print("Successfully connected to DB via proxy.")
+            print(f"DB data: {data}")
+            return data
+        else:
+            print(f"Proxy read error: {resp.text}")
+            return {}
+    except Exception as e:
+        print(f"read_data_via_proxy exception: {e}")
+        return {}
+
 @app.route("/reset_account_claims", methods=["GET", "POST"])
 def reset_account_claims():
+    # Read the full DB data via proxy.
     db_data = read_data_via_proxy()
     if not db_data:
-        return jsonify({"error": "Failed to read DB data"}), 500
+        return jsonify({"status": "No DB data available"}), 200
+
+    # Get slot settings.
     slots = db_data.get("settings", {}).get("slots", {})
     if not slots:
-        return jsonify({"error": "No slot settings found"}), 400
+        return jsonify({"status": "No slot settings found"}), 200
+
     current_time = datetime.now()
     account_claims = db_data.get("account_claims", {})
     claims_updated = False
+
+    # For each slot in settings, if current time is past slot_end, remove claim entries for that slot.
     for slot_id, slot_info in slots.items():
         slot_end_str = slot_info.get("slot_end", "")
         if not slot_end_str:
@@ -234,23 +270,23 @@ def reset_account_claims():
         except Exception as e:
             print(f"Error parsing slot_end for {slot_id}: {e}")
             continue
+
         if current_time > slot_end:
+            # For each user in account_claims, remove this slot if claimed.
             for user_id, claims in account_claims.items():
                 if slot_id in claims:
                     print(f"Clearing account claim for user {user_id} in slot {slot_id}.")
                     del claims[slot_id]
                     claims_updated = True
+
     if claims_updated:
         db_data["account_claims"] = account_claims
         result = write_data_via_proxy(db_data)
+        print("Account claims reset updated in DB.")
         return jsonify({"status": "Account claims reset", "result": result}), 200
     else:
+        print("No account claims needed resetting.")
         return jsonify({"status": "No claims needed resetting"}), 200
-
-@app.errorhandler(405)
-def handle_method_not_allowed(error):
-    # This error handler catches any 405 errors and returns a 200 status code.
-    return "OK", 200
 
 
 # -------------------------------------------------------
